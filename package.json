@@ -11,6 +11,7 @@
   "dependencies": {
     "archiver": "^5.3.0",
     "aws-sdk": "^2.1025.0",
+    "dotenv": "^10.0.0",
     "express": "^4.17.1",
     "express-graphql": "^0.12.0",
     "graphql": "^16.0.1",

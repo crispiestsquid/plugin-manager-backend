@@ -5,39 +5,68 @@ const fs = require('fs');
 const AWS = require('aws-sdk');
 const Plugin = require('../models/plugin');
 const Pusher = require('../models/pusher');
-const { resolve, dirname } = require('path');
+const validateSecret = require('../utils/validate');
 
-const AWS_ID = 'AWSIDHERE';
-const AWS_SECRET = 'AWSSECRETHERE';
-const AWS_BUCKET = 'my-test-plugin-bucket';
+const AWS_ID = process.env.AWS_ID;
+const AWS_SECRET = process.env.AWS_SECRET;
+const AWS_BUCKET = 'wp-plugin-zips-for-deployment';
 
 const s3 = new AWS.S3({
     accessKeyId: AWS_ID,
     secretAccessKey: AWS_SECRET
 });
 
+const API_SECRET = process.env.API_SECRET;
+
 const githubRouter = express.Router();
 
 githubRouter.route('/')
     .post(async (req, res, next) => {
-        // Very first thing is to check if this was a push to the default branch
-        let parts = req.body.ref.split('/');
-        if (parts.includes(req.body.repository.default_branch)) {
-            // Then I want to check to see if this Pusher already exists
-            // getPusherID will return the existing ID or create a Pusher and return its ID
-            const pusherID = await getPusherID(req.body.pusher);
-            if (pusherID) {
-                // Next let's see if this Plugin has run before
-                // plugin will be {pluginID: id of existing plugin, zips: zips array from existing plugin}
-                // or
-                // null
-                const plugin = await getPluginID(req.body.repository.full_name);
-                if (plugin) {
-                    // Get the new zips array
-                    const zips = await getNewZipsArray(req.body.repository.name, req.body.repository.html_url, plugin.zips);
-                    // We just need to update the Plugin!
-                    Plugin.findByIdAndUpdate(plugin.pluginID, {
-                        $set: {
+        // First let's validate the secret
+        isValid = validateSecret(req.get('X-Hub-Signature-256'), JSON.stringify(req.body), API_SECRET);
+        if (isValid) {
+            // Very first thing is to check if this was a push to the default branch
+            let parts = req.body.ref.split('/');
+            if (parts.includes(req.body.repository.default_branch)) {
+                // Then I want to check to see if this Pusher already exists
+                // getPusherID will return the existing ID or create a Pusher and return its ID
+                const pusherID = await getPusherID(req.body.pusher);
+                if (pusherID) {
+                    // Next let's see if this Plugin has run before
+                    // plugin will be {pluginID: id of existing plugin, zips: zips array from existing plugin}
+                    // or
+                    // null
+                    const plugin = await getPluginID(req.body.repository.full_name);
+                    if (plugin) {
+                        // Get the new zips array
+                        const zips = await getNewZipsArray(req.body.repository.name, req.body.repository.html_url, plugin.zips);
+                        // We just need to update the Plugin!
+                        Plugin.findByIdAndUpdate(plugin.pluginID, {
+                            $set: {
+                                name: req.body.repository.name,
+                                fullName: req.body.repository.full_name,
+                                private: req.body.repository.private,
+                                htmlUrl: req.body.repository.html_url,
+                                defaultBranch: req.body.repository.default_branch,
+                                pushedAt: req.body.repository.pushed_at,
+                                updatedAt: req.body.repository.updated_at,
+                                createdAt: req.body.repository.created_at,
+                                zips: zips,
+                                pusherID: pusherID
+                            }
+                        }, { new: true })
+                            .then(plugin => {
+                                console.log('Plugin updated!', plugin);
+                                res.statusCode = 200;
+                                res.setHeader('Content-Type', 'application/json');
+                                res.json({ plugin: plugin });
+                            })
+                            .catch(err => next(err));
+                    } else {
+                        // Create the new zips array
+                        const zips = await getNewZipsArray(req.body.repository.name, req.body.repository.html_url, []);
+                        // We will create a new Plugin entry!
+                        Plugin.create({
                             name: req.body.repository.name,
                             fullName: req.body.repository.full_name,
                             private: req.body.repository.private,
@@ -48,50 +77,32 @@ githubRouter.route('/')
                             createdAt: req.body.repository.created_at,
                             zips: zips,
                             pusherID: pusherID
-                        }
-                    }, { new: true })
-                        .then(plugin => {
-                            console.log('Plugin updated!', plugin);
-                            res.statusCode = 200;
-                            res.setHeader('Content-Type', 'application/json');
-                            res.json({ plugin: plugin });
                         })
-                        .catch(err => next(err));
+                            .then(plugin => {
+                                console.log('Plugin created!', plugin);
+                                res.statusCode = 200;
+                                res.setHeader('Content-Type', 'application/json');
+                                res.json({ plugin: plugin });
+                            })
+                            .catch(err => next(err));
+                    }
                 } else {
-                    // Create the new zips array
-                    const zips = await getNewZipsArray(req.body.repository.name, req.body.repository.html_url, []);
-                    // We will create a new Plugin entry!
-                    Plugin.create({
-                        name: req.body.repository.name,
-                        fullName: req.body.repository.full_name,
-                        private: req.body.repository.private,
-                        htmlUrl: req.body.repository.html_url,
-                        defaultBranch: req.body.repository.default_branch,
-                        pushedAt: req.body.repository.pushed_at,
-                        updatedAt: req.body.repository.updated_at,
-                        createdAt: req.body.repository.created_at,
-                        zips: zips,
-                        pusherID: pusherID
-                    })
-                        .then(plugin => {
-                            console.log('Plugin created!', plugin);
-                            res.statusCode = 200;
-                            res.setHeader('Content-Type', 'application/json');
-                            res.json({ plugin: plugin });
-                        })
-                        .catch(err => next(err));
+                    // We can't go on without the Pusher
+                    res.statusCode = 500;
+                    res.setHeader('Content-Type', 'application/json');
+                    res.json({ error: 'Could not get pusherID...' });
                 }
             } else {
-                // We can't go on without the Pusher
-                res.statusCode = 500;
+                // Ignore this push...
+                res.statusCode = 200;
                 res.setHeader('Content-Type', 'application/json');
-                res.json({ error: 'Could not get pusherID...' });
+                res.json({ message: 'Not a push to the default branch.' });
             }
         } else {
-            // Ignore this push...
-            res.statusCode = 200;
+            // We can't go on without a valid hash
+            res.statusCode = 500;
             res.setHeader('Content-Type', 'application/json');
-            res.json({ message: 'Not a push to the default branch.' });
+            res.json({ error: 'Could not validate hash...' });
         }
     });
 
